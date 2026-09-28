@@ -20,11 +20,11 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import GroupShuffleSplit, GroupKFold, cross_val_score, learning_curve, validation_curve
+from sklearn.model_selection import GroupShuffleSplit, GroupKFold, cross_val_score, learning_curve, validation_curve, cross_val_predict
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import accuracy_score, roc_auc_score, classification_report, silhouette_score, davies_bouldin_score, calinski_harabasz_score
+from sklearn.metrics import accuracy_score, roc_auc_score, classification_report, silhouette_score, davies_bouldin_score, calinski_harabasz_score, confusion_matrix
 from sklearn.inspection import permutation_importance
 
 # In[1]: Data loading and integration
@@ -34,6 +34,10 @@ print("1 - Carregando e integrando as bases de dados...")
 df_matches = pd.read_csv('matchStats.csv') # Placar, números dos fundamentos técnicos (Mandante e Visitante)
 df_players = pd.read_csv('playerStats.csv') # Informações dos jogadores (estatísticas na VNL)
 df_teams = pd.read_csv('teamStats.csv') # Histórico de cada seleção nacional
+
+# print(df_matches.info())
+# print(df_players.info())
+# print(df_teams.info())
 
 data_lines = [] # Inicialização da tabela macro
 
@@ -336,9 +340,12 @@ df_players['ID_Atleta'] = [f"Atleta_{i+1:03d}" for i in range(len(df_players))]
 df_players = df_players.drop(columns=['Player Name'])
 
 # Definindo os parâmetros de forma a avaliar a eficiência de cada fundamento baseada no total de tentativas
-df_players['Taxa_Aces_Jogador'] = np.where(df_players['Service Attempts'] > 0, df_players['Aces'] / df_players['Service Attempts'], 0)
+df_players['Total_Saques'] = df_players['Aces'] + df_players['Service Errors'] + df_players['Service Attempts']
+df_players['Total_Ataques'] = df_players['Kills'] + df_players['Attacking Errors'] + df_players['Attacking Attempts']
+
+df_players['Taxa_Aces_Jogador'] = np.where(df_players['Total_Saques'] > 0, df_players['Aces'] / df_players['Total_Saques'], 0)
 df_players['Taxa_Bloqueios_Jogador'] = df_players['Blocks Per Match']
-df_players['Taxa_Ataques_Jogador'] = np.where(df_players['Attacking Attempts'] > 0, (df_players['Kills'] - df_players['Attacking Errors']) / df_players['Attacking Attempts'], 0)
+df_players['Taxa_Ataques_Jogador'] = np.where(df_players['Total_Ataques'] > 0, (df_players['Kills'] - df_players['Attacking Errors']) / df_players['Total_Ataques'], 0)
 df_players['Taxa_Defesas_Jogador'] = df_players['Digs Per Match']
 
 player_attributes = ['Taxa_Aces_Jogador', 'Taxa_Bloqueios_Jogador', 'Taxa_Ataques_Jogador', 'Taxa_Defesas_Jogador']
@@ -357,7 +364,7 @@ players_analysis_ratio = total_number_net_players/total_number_players*100
 #print(f"Cerca de {players_analysis_ratio}% estão sendo representados nessa base de dados")
 
 # Limpeza dos dados por conta de outliers quando os valores são influenciados diretamente pela questão de acerto/tentativa
-df_players_cleaned = df_net_players[(df_net_players['Attacking Attempts'] > 10) & (df_net_players['Service Attempts'] > 10)].copy()
+df_players_cleaned = df_net_players[(df_net_players['Total_Ataques'] > 10) & (df_net_players['Total_Saques'] > 10)].copy()
 #print(f"Jogadores após filtro (volume mínimo de ataques e saques): {len(df_players_cleaned)} de {len(df_players)}")
 
 
@@ -502,18 +509,40 @@ clusters_profile = df_players_cleaned.groupby('Cluster')[player_attributes].mean
 
 melted_profiles = pd.melt(clusters_profile, id_vars=['Cluster'], value_vars=player_attributes)
 
+perfil = clusters_profile.set_index('Cluster')
+id_rede = perfil['Taxa_Bloqueios_Jogador'].idxmax()   # mais bloqueios -> atacante-bloqueador de rede
+id_saque = perfil['Taxa_Aces_Jogador'].idxmax()       # maior eficiência de saque -> sacador agressivo
+assert id_rede != id_saque, "Os arquétipos não puderam ser distinguidos pelo perfil"
+nomes_clusters = {c: f'{c} - Generalista' for c in perfil.index}
+nomes_clusters[id_rede] = f'{id_rede} - Atacante-bloqueador de rede'
+nomes_clusters[id_saque] = f'{id_saque} - Sacador agressivo'
+melted_profiles['Arquétipo'] = melted_profiles['Cluster'].map(nomes_clusters)
+ordem_legenda = [nomes_clusters[c] for c in sorted(nomes_clusters)]
+
 fig, ax = plt.subplots(figsize=(10, 6))
-sns.barplot(data=melted_profiles, x='variable', y='value', hue='Cluster', palette='Set2', ax=ax)
-#ax.set_title('Perfil Técnico dos Clusters de Atletas (Espaço Ponderado por ML)', pad=15, fontweight='bold')
+sns.barplot(data=melted_profiles, x='variable', y='value', hue='Arquétipo',
+            hue_order=ordem_legenda, palette='Set2', errorbar=None, ax=ax)
 ax.set_xlabel('Indicadores Técnicos de Performance Individual')
-ax.set_ylabel('Média Ponderada')
+ax.set_ylabel('Média do indicador')
+ax.set_xticks(range(4))
 ax.set_xticklabels(['Eficiência Saque (Aces)', 'Bloqueios por Partida', 'Eficiência Líquida Ataque', 'Defesas por Partida'])
-ax.legend(title='Arquétipos Estratégicos')
+ax.legend(title='Arquétipos Estratégicos', loc='upper left')
+
+# Rótulos nos dados (2 casas decimais, com vírgula)
+for container in ax.containers:
+    ax.bar_label(container, labels=[f'{v:.2f}'.replace('.', ',') for v in container.datavalues],
+                 padding=3, fontsize=9)
+
+# Remove o eixo Y (marcas, valores, linha e grade), mantendo apenas o título
+ax.tick_params(axis='y', left=False, labelleft=False)
+ax.yaxis.grid(False)
+sns.despine(ax=ax, left=True)
 
 min_value = melted_profiles['value'].min()
 max_value = melted_profiles['value'].max()
 narrow = (max_value - min_value) * 0.1
-ax.set_ylim(min(0, min_value - narrow), max_value + narrow)
+limite_inferior = 0 if min_value >= 0 else min_value - narrow   # sem folga abaixo de zero se não há valores negativos
+ax.set_ylim(limite_inferior, max_value + narrow * 1.5)          # folga extra no topo para os rótulos
 ax.axhline(0, color='black', linewidth=0.8)
 plt.tight_layout()
 plt.savefig('cluster_jogadores.png', dpi=300)
@@ -521,4 +550,37 @@ plt.close()
 
 # Exportando a tabela final: ID anonimizado, equipe, posição, cluster atribuído e as 4 variáveis de performance.
 df_players_cleaned[['ID_Atleta', 'Team', 'Position', 'Cluster'] + player_attributes].to_csv('resultados_preliminares_jogadores.csv', index=False)
+
+# In[7]: Exportação dos valores numéricos citados no manuscrito
+
+resumo = []
+resumo.append(f"Observações macro: {len(df_macro)} ({df_macro['ID_Jogo'].nunique()} partidas)")
+resumo.append(f"Teste agrupado: n={len(y_test)} | acurácia={accuracy:.3f} | AUC={auc:.3f}")
+resumo.append("Matriz de confusão (linhas=real, colunas=previsto; 0=Derrota, 1=Vitória):\n" + str(confusion_matrix(y_test, pred_test)))
+resumo.append(classification_report(y_test, pred_test, target_names=['Derrota', 'Vitória']))
+resumo.append(f"CV 5-fold por dobra: {np.round(cv_scores, 3)} | média={cv_scores.mean():.3f} | desvio={cv_scores.std():.3f}")
+
+pred_oof = cross_val_predict(rf_model, X, y, groups=groups, cv=GroupKFold(n_splits=5))
+resumo.append("Previsões fora da dobra (todas as observações):\n" + str(confusion_matrix(y, pred_oof)))
+resumo.append(classification_report(y, pred_oof, target_names=['Derrota', 'Vitória']))
+
+resumo.append(f"Atletas: total={total_number_players} | rede={total_number_net_players} | "
+              f"após filtro={len(df_players_cleaned)} ({len(df_players_cleaned)/total_number_net_players:.1%} da população-alvo)")
+resumo.append(f"K recomendado={k_optimum} | grupos: {df_players_cleaned['Cluster'].value_counts().sort_index().to_dict()}")
+resumo.append(f"Pesos do RF no K-Means: {dict(zip(player_attributes, np.round(rf_weights, 3)))}")
+
+with open('resumo_resultados.txt', 'w', encoding='utf-8') as f:
+    f.write('\n\n'.join(resumo))
+
+comparison_table.round(3).to_csv('tabela_criterios_k.csv', index=False)
+
+perfil = df_players_cleaned.groupby('Cluster')[player_attributes].agg(['mean', 'std'])
+perfil['n'] = df_players_cleaned.groupby('Cluster').size()
+perfil.round(3).to_csv('tabela_perfil_clusters.csv')
+
+grp = df_players_cleaned.groupby('Cluster')[player_attributes]
+(grp.std() / grp.mean()).round(2).to_csv('cv_por_cluster.csv')
+
+pd.crosstab(df_players_cleaned['Cluster'], df_players_cleaned['Position']).to_csv('composicao_cluster_posicao.csv')
+
 print("\n=== ANÁLISE CONCLUÍDA ===")
